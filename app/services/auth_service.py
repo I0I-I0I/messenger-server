@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Select, select
@@ -17,6 +18,7 @@ from app.core.settings import get_settings
 from app.models import RefreshToken, User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenPair
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -40,10 +42,12 @@ def _issue_refresh_token(db: Session, user_id: int) -> tuple[str, RefreshToken]:
     )
     db.add(refresh_token)
     db.flush()
+    logger.debug("Issued refresh token row token_id=%s user_id=%s", refresh_token.id, user_id)
     return raw_token, refresh_token
 
 
 def _token_pair(db: Session, user: User) -> TokenPair:
+    logger.debug("Issuing token pair for user_id=%s", user.id)
     access_token = create_access_token(subject=str(user.id))
     refresh_token_raw, _ = _issue_refresh_token(db, user.id)
     return TokenPair(
@@ -55,8 +59,10 @@ def _token_pair(db: Session, user: User) -> TokenPair:
 
 
 def register_user(db: Session, payload: RegisterRequest) -> tuple[User, TokenPair]:
+    logger.info("Register attempt username=%s", payload.username)
     existing_user = db.scalar(select(User).where(User.username == payload.username))
     if existing_user is not None:
+        logger.warning("Register failed username already taken username=%s", payload.username)
         raise APIError(status_code=409, code="username_taken", message="Username is already in use")
 
     user = User(
@@ -71,27 +77,34 @@ def register_user(db: Session, payload: RegisterRequest) -> tuple[User, TokenPai
 
     db.commit()
     db.refresh(user)
+    logger.info("Register success user_id=%s username=%s", user.id, user.username)
     return user, tokens
 
 
 def authenticate_user(db: Session, payload: LoginRequest) -> tuple[User, TokenPair]:
+    logger.info("Login attempt username=%s", payload.username)
     user = db.scalar(select(User).where(User.username == payload.username))
     if user is None or not verify_password(payload.password, user.password_hash):
+        logger.warning("Login failed username=%s", payload.username)
         raise APIError(status_code=401, code="invalid_credentials", message="Invalid username or password")
 
     tokens = _token_pair(db, user)
     db.commit()
+    logger.info("Login success user_id=%s", user.id)
     return user, tokens
 
 
 def rotate_refresh_token(db: Session, refresh_token_raw: str) -> tuple[User, TokenPair]:
+    logger.info("Refresh token rotation attempt")
     token_hash_value = hash_token(refresh_token_raw)
     current_token = db.scalar(_active_refresh_token_stmt(token_hash_value))
     if current_token is None:
+        logger.warning("Refresh token rotation failed due to invalid/expired token")
         raise APIError(status_code=401, code="invalid_refresh_token", message="Refresh token is invalid or expired")
 
     user = db.get(User, current_token.user_id)
     if user is None:
+        logger.warning("Refresh token rotation failed because user was not found")
         raise APIError(status_code=401, code="invalid_refresh_token", message="Refresh token is invalid")
 
     now = datetime.now(UTC)
@@ -99,6 +112,12 @@ def rotate_refresh_token(db: Session, refresh_token_raw: str) -> tuple[User, Tok
 
     current_token.revoked_at = now
     current_token.replaced_by_token_id = new_token.id
+    logger.debug(
+        "Rotating refresh token old_token_id=%s new_token_id=%s user_id=%s",
+        current_token.id,
+        new_token.id,
+        user.id,
+    )
 
     access_token = create_access_token(subject=str(user.id))
     db.commit()
@@ -109,15 +128,22 @@ def rotate_refresh_token(db: Session, refresh_token_raw: str) -> tuple[User, Tok
         token_type="bearer",
         expires_in=settings.access_token_expire_minutes * 60,
     )
+    logger.info("Refresh token rotation success user_id=%s", user.id)
     return user, tokens
 
 
 def revoke_refresh_token(db: Session, refresh_token_raw: str) -> None:
+    logger.info("Logout token revoke attempt")
     token_hash_value = hash_token(refresh_token_raw)
     token = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash_value))
     if token is None:
+        logger.debug("Logout token not found; treating as no-op")
         return
 
     if token.revoked_at is None:
         token.revoked_at = datetime.now(UTC)
         db.commit()
+        logger.info("Refresh token revoked token_id=%s user_id=%s", token.id, token.user_id)
+        return
+
+    logger.debug("Refresh token already revoked token_id=%s user_id=%s", token.id, token.user_id)

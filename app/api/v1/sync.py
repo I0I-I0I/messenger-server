@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -14,11 +15,13 @@ from app.schemas.messages import MessageRead
 from app.schemas.users import UserPublic
 from app.services import conversation_service, message_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sync", tags=["sync"])
 
 
 def _parse_after_seq_by_conversation(raw: str | None) -> dict[str, int]:
     if raw is None or raw == "":
+        logger.debug("after_seq_by_conversation not provided; defaulting to empty map")
         return {}
 
     try:
@@ -30,6 +33,7 @@ def _parse_after_seq_by_conversation(raw: str | None) -> dict[str, int]:
             if not isinstance(conversation_id, str) or not isinstance(seq, int) or seq < 0:
                 raise ValueError("invalid item")
             result[conversation_id] = seq
+        logger.debug("Parsed after_seq_by_conversation JSON for %s conversations", len(result))
         return result
     except json.JSONDecodeError:
         pass
@@ -60,6 +64,7 @@ def _parse_after_seq_by_conversation(raw: str | None) -> dict[str, int]:
                 message="Invalid after_seq_by_conversation format",
             )
         result[conversation_id] = int(seq_text.strip())
+    logger.debug("Parsed after_seq_by_conversation CSV for %s conversations", len(result))
     return result
 
 
@@ -68,6 +73,7 @@ def bootstrap(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    logger.info("Sync bootstrap requested user_id=%s", current_user.id)
     conversations = conversation_service.list_user_conversations(db, current_user.id)
     conversation_ids = [conversation["id"] for conversation in conversations]
     recent_messages = message_service.list_recent_messages(db, conversation_ids=conversation_ids, limit=200)
@@ -82,6 +88,12 @@ def bootstrap(
             MessageRead.model_validate(message).model_dump(mode="json") for message in recent_messages
         ],
     }
+    logger.debug(
+        "Sync bootstrap payload user_id=%s conversations=%s recent_messages=%s",
+        current_user.id,
+        len(serialized_conversations),
+        len(payload["recent_messages"]),
+    )
     return success_response(payload)
 
 
@@ -91,6 +103,7 @@ def sync_changes(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    logger.info("Sync changes requested user_id=%s", current_user.id)
     after_map = _parse_after_seq_by_conversation(after_seq_by_conversation)
     conversations = conversation_service.list_user_conversations(db, current_user.id)
 
@@ -114,4 +127,5 @@ def sync_changes(
             }
         )
 
+    logger.debug("Sync changes response user_id=%s changed_conversations=%s", current_user.id, len(changes))
     return success_response({"changes": changes})

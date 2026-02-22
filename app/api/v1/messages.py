@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,7 @@ from app.models import User
 from app.schemas.messages import MessageRead, SendMessageRequest
 from app.services import conversation_service, message_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/conversations/{conversation_id}/messages", tags=["messages"])
 
 
@@ -21,6 +24,13 @@ def list_messages(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    logger.info(
+        "List messages endpoint hit user_id=%s conversation_id=%s after_seq=%s limit=%s",
+        current_user.id,
+        conversation_id,
+        after_seq,
+        limit,
+    )
     conversation_service.require_membership(db, user_id=current_user.id, conversation_id=conversation_id)
     messages = message_service.list_messages(
         db,
@@ -39,6 +49,12 @@ def send_message(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    logger.info(
+        "Send message endpoint hit user_id=%s conversation_id=%s client_message_id=%s",
+        current_user.id,
+        conversation_id,
+        payload.client_message_id,
+    )
     conversation_service.require_membership(db, user_id=current_user.id, conversation_id=conversation_id)
     message, created = message_service.send_message(
         db,
@@ -50,4 +66,10 @@ def send_message(
 
     response = MessageRead.model_validate(message).model_dump(mode="json")
     status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    logger.debug(
+        "Send message endpoint completed user_id=%s conversation_id=%s created=%s",
+        current_user.id,
+        conversation_id,
+        created,
+    )
     return success_response(response, status_code=status_code)

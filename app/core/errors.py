@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 class APIError(Exception):
@@ -41,7 +45,14 @@ def error_response(
 
 def add_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(APIError)
-    async def handle_api_error(_: Request, exc: APIError) -> JSONResponse:
+    async def handle_api_error(request: Request, exc: APIError) -> JSONResponse:
+        logger.warning(
+            "APIError raised path=%s status=%s code=%s message=%s",
+            request.url.path,
+            exc.status_code,
+            exc.code,
+            exc.message,
+        )
         return error_response(
             status_code=exc.status_code,
             code=exc.code,
@@ -50,7 +61,8 @@ def add_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        logger.warning("Validation error path=%s errors=%s", request.url.path, exc.errors())
         return error_response(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             code="validation_error",
@@ -59,8 +71,9 @@ def add_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(HTTPException)
-    async def handle_http_error(_: Request, exc: HTTPException) -> JSONResponse:
+    async def handle_http_error(request: Request, exc: HTTPException) -> JSONResponse:
         message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        logger.warning("HTTPException path=%s status=%s message=%s", request.url.path, exc.status_code, message)
         return error_response(
             status_code=exc.status_code,
             code="http_error",
@@ -69,7 +82,8 @@ def add_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def handle_unexpected_error(_: Request, __: Exception) -> JSONResponse:
+    async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("Unexpected error path=%s error=%s", request.url.path, exc)
         return error_response(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code="internal_error",

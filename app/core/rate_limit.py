@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from collections import defaultdict, deque
 from time import monotonic
@@ -8,6 +9,8 @@ from fastapi import Request
 
 from app.core.errors import APIError
 from app.core.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryRateLimiter:
@@ -40,5 +43,7 @@ auth_limiter = InMemoryRateLimiter(
 def enforce_auth_rate_limit(request: Request) -> None:
     client_ip = request.client.host if request.client else "unknown"
     key = f"{client_ip}:{request.url.path}"
+    logger.debug("Rate limit check key=%s", key)
     if not auth_limiter.hit(key):
+        logger.warning("Rate limit exceeded for key=%s", key)
         raise APIError(status_code=429, code="rate_limited", message="Too many authentication requests")

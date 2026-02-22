@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -10,11 +12,13 @@ from app.db.session import get_db
 from app.models import User
 from app.schemas.users import UserPublic
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("/me")
 def me(current_user: User = Depends(get_current_user)):
+    logger.info("Users me endpoint hit user_id=%s", current_user.id)
     return success_response(UserPublic.model_validate(current_user).model_dump(mode="json"))
 
 
@@ -25,6 +29,7 @@ def search_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    logger.info("Users search endpoint hit user_id=%s query=%s limit=%s", current_user.id, query, limit)
     normalized_query = f"%{query.lower()}%"
     rows = db.scalars(
         select(User)
@@ -40,4 +45,5 @@ def search_users(
     ).all()
 
     users = [UserPublic.model_validate(row).model_dump(mode="json") for row in rows]
+    logger.debug("Users search result count=%s for user_id=%s", len(users), current_user.id)
     return success_response({"users": users})
