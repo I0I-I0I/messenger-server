@@ -15,7 +15,7 @@ class MessageRead(BaseModel):
 
     id: str
     conversation_id: str
-    sender_id: int
+    sender_id: str
     client_message_id: str
     seq: int
     content: str

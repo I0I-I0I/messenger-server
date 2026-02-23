@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-def _register(client, username: str, password: str = "password123") -> int:
+def _register(client, username: str, password: str = "password123") -> str:
     response = client.post(
         "/v1/auth/register",
         json={"username": username, "display_name": username, "password": password},

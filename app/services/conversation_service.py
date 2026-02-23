@@ -19,10 +19,10 @@ class ConversationPayload(TypedDict):
     updated_at: datetime
     last_message_preview: str | None
     last_message_at: datetime | None
-    member_ids: list[int]
+    member_ids: list[str]
 
 
-def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[str, list[int]]:
+def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[str, list[str]]:
     if not conversation_ids:
         return {}
 
@@ -32,14 +32,14 @@ def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[s
         )
     ).all()
 
-    result: dict[str, list[int]] = {conversation_id: [] for conversation_id in conversation_ids}
+    result: dict[str, list[str]] = {conversation_id: [] for conversation_id in conversation_ids}
     for conversation_id, user_id in rows:
         result.setdefault(conversation_id, []).append(user_id)
     logger.debug("Loaded conversation members for %s conversations", len(conversation_ids))
     return result
 
 
-def require_membership(db: Session, *, user_id: int, conversation_id: str) -> None:
+def require_membership(db: Session, *, user_id: str, conversation_id: str) -> None:
     logger.debug("Checking membership user_id=%s conversation_id=%s", user_id, conversation_id)
     member = db.get(ConversationMember, {"conversation_id": conversation_id, "user_id": user_id})
     if member is None:
@@ -47,7 +47,7 @@ def require_membership(db: Session, *, user_id: int, conversation_id: str) -> No
         raise APIError(status_code=404, code="conversation_not_found", message="Conversation not found")
 
 
-def list_user_conversations(db: Session, user_id: int) -> list[ConversationPayload]:
+def list_user_conversations(db: Session, user_id: str) -> list[ConversationPayload]:
     logger.debug("Listing conversations for user_id=%s", user_id)
     conversation_rows = db.scalars(
         select(Conversation)
@@ -75,7 +75,7 @@ def list_user_conversations(db: Session, user_id: int) -> list[ConversationPaylo
     return payload
 
 
-def get_or_create_direct_conversation(db: Session, *, user_id: int, other_user_id: int) -> ConversationPayload:
+def get_or_create_direct_conversation(db: Session, *, user_id: str, other_user_id: str) -> ConversationPayload:
     logger.info("Open or create direct conversation user_id=%s other_user_id=%s", user_id, other_user_id)
     if user_id == other_user_id:
         logger.warning("Cannot create direct conversation with self user_id=%s", user_id)

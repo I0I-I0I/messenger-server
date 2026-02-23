@@ -76,7 +76,7 @@ def send_message(
     db: Session,
     *,
     conversation_id: str,
-    sender_id: int,
+    sender_id: str,
     client_message_id: str,
     content: str,
 ) -> tuple[dict[str, object], bool]:

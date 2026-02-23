@@ -31,7 +31,7 @@ def _active_refresh_token_stmt(token_hash: str) -> Select[tuple[RefreshToken]]:
     )
 
 
-def _issue_refresh_token(db: Session, user_id: int) -> tuple[str, RefreshToken]:
+def _issue_refresh_token(db: Session, user_id: str) -> tuple[str, RefreshToken]:
     now = datetime.now(UTC)
     raw_token = generate_refresh_token()
     refresh_token = RefreshToken(

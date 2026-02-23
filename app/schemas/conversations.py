@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class DirectConversationCreateRequest(BaseModel):
-    other_user_id: int = Field(gt=0)
+    other_user_id: str = Field(min_length=1, max_length=64)
 
 
 class ConversationSummary(BaseModel):
@@ -17,4 +17,4 @@ class ConversationSummary(BaseModel):
     updated_at: datetime
     last_message_preview: str | None
     last_message_at: datetime | None
-    member_ids: list[int]
+    member_ids: list[str]

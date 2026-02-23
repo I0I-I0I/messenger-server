@@ -23,11 +23,11 @@ def get_current_user(
     logger.debug("Resolving current user from access token")
     payload = decode_access_token(token)
     subject = payload.get("sub")
-    if not isinstance(subject, str) or not subject.isdigit():
+    if not isinstance(subject, str) or not subject:
         logger.warning("Token subject is invalid")
         raise APIError(status_code=401, code="invalid_token", message="Token payload is invalid")
 
-    user = db.get(User, int(subject))
+    user = db.get(User, subject)
     if user is None:
         logger.warning("Token user_id=%s not found", subject)
         raise APIError(status_code=401, code="invalid_token", message="Token user was not found")
