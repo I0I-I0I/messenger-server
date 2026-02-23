@@ -7,16 +7,16 @@ from app.schemas.messages import MessageRead
 from app.schemas.users import UserPublic
 
 
-class ConversationChanges(BaseModel):
-    conversation_id: str
-    messages: list[MessageRead]
-
-
 class BootstrapResponse(BaseModel):
     me: UserPublic
+    user: UserPublic
+    users: list[UserPublic]
     conversations: list[ConversationSummary]
     recent_messages: list[MessageRead]
+    recentMessages: list[MessageRead]
 
 
 class SyncChangesResponse(BaseModel):
-    changes: list[ConversationChanges]
+    users: list[UserPublic]
+    conversations: list[ConversationSummary]
+    messages: list[MessageRead]

@@ -13,7 +13,7 @@ from app.models import User
 from app.schemas.conversations import ConversationSummary
 from app.schemas.messages import MessageRead
 from app.schemas.users import UserPublic
-from app.services import conversation_service, message_service
+from app.services import conversation_service, message_service, user_hydration_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -77,16 +77,33 @@ def bootstrap(
     conversations = conversation_service.list_user_conversations(db, current_user.id)
     conversation_ids = [conversation["id"] for conversation in conversations]
     recent_messages = message_service.list_recent_messages(db, conversation_ids=conversation_ids, limit=200)
-    serialized_conversations = [
-        ConversationSummary.model_validate(conversation).model_dump(mode="json") for conversation in conversations
-    ]
+    referenced_user_ids = user_hydration_service.collect_user_ids_from_conversations(conversations)
+    referenced_user_ids.update(user_hydration_service.collect_user_ids_from_messages(recent_messages))
+    referenced_user_ids.add(current_user.id)
+    users = user_hydration_service.fetch_users_by_ids(
+        db,
+        requester_id=current_user.id,
+        user_ids=sorted(referenced_user_ids),
+        visibility_mode="conversation_scoped",
+    )
+    serialized_users = [UserPublic.model_validate(user_hydration_service.serialize_user_public(row)).model_dump(mode="json") for row in users]
+    users_by_id = {user["id"]: user for user in serialized_users}
+
+    hydrated_conversations = user_hydration_service.attach_members_to_conversations(
+        [dict(conversation) for conversation in conversations],
+        users_by_id,
+    )
+    serialized_conversations = [ConversationSummary.model_validate(conversation).model_dump(mode="json") for conversation in hydrated_conversations]
+    serialized_recent_messages = [MessageRead.model_validate(message).model_dump(mode="json") for message in recent_messages]
+    me = UserPublic.model_validate(current_user).model_dump(mode="json")
 
     payload = {
-        "me": UserPublic.model_validate(current_user).model_dump(mode="json"),
+        "me": me,
+        "user": me,
+        "users": serialized_users,
         "conversations": serialized_conversations,
-        "recent_messages": [
-            MessageRead.model_validate(message).model_dump(mode="json") for message in recent_messages
-        ],
+        "recent_messages": serialized_recent_messages,
+        "recentMessages": serialized_recent_messages,
     }
     logger.debug(
         "Sync bootstrap payload user_id=%s conversations=%s recent_messages=%s",
@@ -106,8 +123,7 @@ def sync_changes(
     logger.info("Sync changes requested user_id=%s", current_user.id)
     after_map = _parse_after_seq_by_conversation(after_seq_by_conversation)
     conversations = conversation_service.list_user_conversations(db, current_user.id)
-
-    changes: list[dict[str, object]] = []
+    changed_messages: list[dict[str, object]] = []
     for conversation in conversations:
         conversation_id = conversation["id"]
         after_seq = after_map.get(conversation_id, 0)
@@ -119,13 +135,37 @@ def sync_changes(
         )
         if not messages:
             continue
+        changed_messages.extend(MessageRead.model_validate(message).model_dump(mode="json") for message in messages)
 
-        changes.append(
-            {
-                "conversation_id": conversation_id,
-                "messages": [MessageRead.model_validate(message).model_dump(mode="json") for message in messages],
-            }
-        )
+    referenced_user_ids = user_hydration_service.collect_user_ids_from_conversations(conversations)
+    referenced_user_ids.update(user_hydration_service.collect_user_ids_from_messages(changed_messages))
+    referenced_user_ids.add(current_user.id)
+    users = user_hydration_service.fetch_users_by_ids(
+        db,
+        requester_id=current_user.id,
+        user_ids=sorted(referenced_user_ids),
+        visibility_mode="conversation_scoped",
+    )
+    serialized_users = [UserPublic.model_validate(user_hydration_service.serialize_user_public(row)).model_dump(mode="json") for row in users]
+    users_by_id = {user["id"]: user for user in serialized_users}
 
-    logger.debug("Sync changes response user_id=%s changed_conversations=%s", current_user.id, len(changes))
-    return success_response({"changes": changes})
+    hydrated_conversations = user_hydration_service.attach_members_to_conversations(
+        [dict(conversation) for conversation in conversations],
+        users_by_id,
+    )
+    serialized_conversations = [ConversationSummary.model_validate(conversation).model_dump(mode="json") for conversation in hydrated_conversations]
+
+    logger.debug(
+        "Sync changes response user_id=%s conversations=%s messages=%s users=%s",
+        current_user.id,
+        len(serialized_conversations),
+        len(changed_messages),
+        len(serialized_users),
+    )
+    return success_response(
+        {
+            "conversations": serialized_conversations,
+            "messages": changed_messages,
+            "users": serialized_users,
+        }
+    )

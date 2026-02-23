@@ -6,6 +6,7 @@ import json
 from sqlalchemy.orm import Session
 
 from app.models import Conversation, Message, RealtimeOutboxEvent
+from app.services import user_hydration_service
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -41,12 +42,23 @@ def _enqueue_event(
 
 
 def enqueue_message_created(db: Session, *, message: Message) -> None:
+    sender_rows = user_hydration_service.fetch_users_by_ids(
+        db,
+        requester_id=message.sender_id,
+        user_ids=[message.sender_id],
+        visibility_mode="all",
+    )
+    if not sender_rows:
+        raise RuntimeError("Sender user could not be resolved for realtime payload")
+    sender = user_hydration_service.serialize_user_public(sender_rows[0])
+
     payload: dict[str, object] = {
         "id": message.id,
         "sender_id": message.sender_id,
         "client_message_id": message.client_message_id,
         "content": message.content,
         "created_at": _serialize_datetime(message.created_at),
+        "sender": sender,
     }
     _enqueue_event(
         db,

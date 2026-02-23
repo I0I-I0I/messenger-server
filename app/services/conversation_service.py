@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import APIError
 from app.models import Conversation, ConversationCounter, ConversationMember, User
+from app.services import user_hydration_service
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class ConversationPayload(TypedDict):
     last_message_preview: str | None
     last_message_at: datetime | None
     member_ids: list[str]
+    members: list[dict[str, object]]
 
 
 def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[str, list[str]]:
@@ -29,7 +31,7 @@ def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[s
     rows = db.execute(
         select(ConversationMember.conversation_id, ConversationMember.user_id).where(
             ConversationMember.conversation_id.in_(conversation_ids)
-        )
+        ).order_by(ConversationMember.conversation_id.asc(), ConversationMember.user_id.asc())
     ).all()
 
     result: dict[str, list[str]] = {conversation_id: [] for conversation_id in conversation_ids}
@@ -37,6 +39,41 @@ def _conversation_member_ids(db: Session, conversation_ids: list[str]) -> dict[s
         result.setdefault(conversation_id, []).append(user_id)
     logger.debug("Loaded conversation members for %s conversations", len(conversation_ids))
     return result
+
+
+def _build_conversation_payloads(
+    db: Session,
+    *,
+    requester_id: str,
+    conversation_rows: list[Conversation],
+) -> list[ConversationPayload]:
+    conversation_ids = [conversation.id for conversation in conversation_rows]
+    member_map = _conversation_member_ids(db, conversation_ids)
+
+    payload: list[ConversationPayload] = []
+    for conversation in conversation_rows:
+        payload.append(
+            {
+                "id": conversation.id,
+                "type": conversation.type,
+                "updated_at": conversation.updated_at,
+                "last_message_preview": conversation.last_message_preview,
+                "last_message_at": conversation.last_message_at,
+                "member_ids": member_map.get(conversation.id, []),
+                "members": [],
+            }
+        )
+
+    user_ids = user_hydration_service.collect_user_ids_from_conversations(payload)
+    users = user_hydration_service.fetch_users_by_ids(
+        db,
+        requester_id=requester_id,
+        user_ids=user_ids,
+        visibility_mode="conversation_scoped",
+    )
+    users_by_id = {user.id: user_hydration_service.serialize_user_public(user) for user in users}
+    user_hydration_service.attach_members_to_conversations(payload, users_by_id)
+    return payload
 
 
 def require_membership(db: Session, *, user_id: str, conversation_id: str) -> None:
@@ -55,22 +92,7 @@ def list_user_conversations(db: Session, user_id: str) -> list[ConversationPaylo
         .where(ConversationMember.user_id == user_id)
         .order_by(func.coalesce(Conversation.last_message_at, Conversation.updated_at).desc())
     ).all()
-
-    conversation_ids = [conversation.id for conversation in conversation_rows]
-    member_map = _conversation_member_ids(db, conversation_ids)
-
-    payload: list[ConversationPayload] = []
-    for conversation in conversation_rows:
-        payload.append(
-            {
-                "id": conversation.id,
-                "type": conversation.type,
-                "updated_at": conversation.updated_at,
-                "last_message_preview": conversation.last_message_preview,
-                "last_message_at": conversation.last_message_at,
-                "member_ids": member_map.get(conversation.id, []),
-            }
-        )
+    payload = _build_conversation_payloads(db, requester_id=user_id, conversation_rows=list(conversation_rows))
     logger.debug("Found %s conversations for user_id=%s", len(payload), user_id)
     return payload
 
@@ -103,15 +125,11 @@ def get_or_create_direct_conversation(db: Session, *, user_id: str, other_user_i
 
     if existing is not None:
         logger.debug("Returning existing direct conversation conversation_id=%s", existing.id)
-        member_map = _conversation_member_ids(db, [existing.id])
-        return {
-            "id": existing.id,
-            "type": existing.type,
-            "updated_at": existing.updated_at,
-            "last_message_preview": existing.last_message_preview,
-            "last_message_at": existing.last_message_at,
-            "member_ids": member_map.get(existing.id, []),
-        }
+        return _build_conversation_payloads(
+            db,
+            requester_id=user_id,
+            conversation_rows=[existing],
+        )[0]
 
     conversation = Conversation(type="direct")
     db.add(conversation)
@@ -128,12 +146,8 @@ def get_or_create_direct_conversation(db: Session, *, user_id: str, other_user_i
     db.commit()
     db.refresh(conversation)
     logger.info("Direct conversation created conversation_id=%s users=%s,%s", conversation.id, user_id, other_user_id)
-
-    return {
-        "id": conversation.id,
-        "type": conversation.type,
-        "updated_at": conversation.updated_at,
-        "last_message_preview": conversation.last_message_preview,
-        "last_message_at": conversation.last_message_at,
-        "member_ids": [user_id, other_user_id],
-    }
+    return _build_conversation_payloads(
+        db,
+        requester_id=user_id,
+        conversation_rows=[conversation],
+    )[0]

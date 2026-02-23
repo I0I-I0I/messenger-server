@@ -105,3 +105,6 @@ def test_ws_delivers_message_events_to_subscribers(client):
         message_event = event_one if event_one["type"] == "message.created" else event_two
         assert message_event["conversation_id"] == conversation_id
         assert message_event["payload"]["content"] == send_payload["content"]
+        assert message_event["payload"]["sender_id"] == alice_id
+        assert message_event["payload"]["sender"]["id"] == alice_id
+        assert message_event["payload"]["sender"]["username"] == "alice"

@@ -10,7 +10,8 @@ from app.api.deps import get_current_user
 from app.core.errors import success_response
 from app.db.session import get_db
 from app.models import User
-from app.schemas.users import UserPublic
+from app.schemas.users import UserBatchLookupRequest, UserPublic
+from app.services import user_hydration_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
@@ -46,4 +47,21 @@ def search_users(
 
     users = [UserPublic.model_validate(row).model_dump(mode="json") for row in rows]
     logger.debug("Users search result count=%s for user_id=%s", len(users), current_user.id)
+    return success_response({"users": users})
+
+
+@router.post("/batch")
+def batch_users(
+    payload: UserBatchLookupRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    logger.info("Users batch endpoint hit user_id=%s ids=%s", current_user.id, len(payload.ids))
+    rows = user_hydration_service.fetch_users_by_ids(
+        db,
+        requester_id=current_user.id,
+        user_ids=payload.ids,
+        visibility_mode="conversation_scoped",
+    )
+    users = [UserPublic.model_validate(user_hydration_service.serialize_user_public(row)).model_dump(mode="json") for row in rows]
     return success_response({"users": users})

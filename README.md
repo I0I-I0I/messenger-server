@@ -54,6 +54,7 @@
 
 - `GET /v1/users/me`
 - `GET /v1/users/search?query=&limit=`
+- `POST /v1/users/batch`
 
 ### Диалоги
 
@@ -69,6 +70,10 @@
 
 - `GET /v1/sync/bootstrap`
 - `GET /v1/sync/changes?after_seq_by_conversation=...`
+
+`/v1/sync/bootstrap` возвращает `me`, `user`, `users`, `conversations`, `recent_messages`, `recentMessages`.
+
+`/v1/sync/changes` возвращает плоский дельта-пакет: `users`, `conversations`, `messages`.
 
 ## WebSocket
 
