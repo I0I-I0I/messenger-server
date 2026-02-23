@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import APIError
 from app.models import Conversation, ConversationCounter, Message
+from app.services import realtime_service
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +139,14 @@ def send_message(
         content=content,
     )
     db.add(message)
+    db.flush()
 
     now = datetime.now(UTC)
     conversation.updated_at = now
     conversation.last_message_at = now
     conversation.last_message_preview = content[:PREVIEW_MAX_LENGTH]
+    realtime_service.enqueue_message_created(db, message=message)
+    realtime_service.enqueue_conversation_updated(db, conversation=conversation, seq=seq)
 
     try:
         db.commit()

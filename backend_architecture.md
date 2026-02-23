@@ -1,16 +1,16 @@
 # Messenger Architecture (FastAPI Backend + Expo Offline-First Client)
 
 ## Summary
-- This repository is currently a backend-only FastAPI service for messenger APIs.
-- The mobile/web client architecture (Expo/React Native) is documented from `additional_info.md` and is currently offline-first/local-only.
-- Integration target remains strict offline-first: UI reads from SQLite only; network writes into SQLite through sync/outbox flows.
-- Backend is implemented with SQLite + SQLAlchemy and designed so it can move to Postgres later.
+- Backend is a FastAPI service with SQLite + SQLAlchemy, designed to be Postgres-friendly later.
+- Architecture is offline-first end-to-end: UI reads only from local SQLite on client.
+- REST remains source of correctness for durable writes and recovery.
+- WebSocket is implemented as an additive realtime path for low-latency event delivery.
 
-## Current State
+## Current Backend State (Implemented)
 
-### Repository Snapshot (This Repo)
+### Stack and Layout
 - Stack: Python, FastAPI, SQLAlchemy, Pydantic, JWT auth.
-- Root layout:
+- Key paths:
   - `app/main.py`
   - `app/core/`
   - `app/db/`
@@ -18,15 +18,10 @@
   - `app/schemas/`
   - `app/api/v1/`
   - `app/services/`
+  - `app/realtime/`
   - `tests/`
-- Entrypoints:
-  - API app: `app/main.py`
-  - Runner: `main.py`
-- Test status baseline:
-  - `tests/test_auth.py`
-  - `tests/test_messages.py`
 
-### Backend Features Already Implemented
+### Implemented APIs
 - Auth:
   - `POST /v1/auth/register`
   - `POST /v1/auth/login`
@@ -44,32 +39,33 @@
 - Sync:
   - `GET /v1/sync/bootstrap`
   - `GET /v1/sync/changes?after_seq_by_conversation=...`
+- WebSocket:
+  - `WS /v1/ws`
 
 ## Architecture Principles
-- Offline-first is non-negotiable:
-  - UI reads from local SQLite only.
-  - Network layer never becomes UI source of truth directly.
-- Consistent API envelope:
+- Offline-first is non-negotiable.
+- Consistent HTTP envelope:
   - Success: `{ "data": ... }`
   - Error: `{ "error": { "code": string, "message": string, "details"?: any } }`
-- Idempotency for sends:
-  - Message send is deduped by `(sender_id, client_message_id)`.
-- Predictable ordering:
-  - Server assigns per-conversation `seq` via `conversation_counters`.
+- Message idempotency by `(sender_id, client_message_id)`.
+- Ordering by server-assigned per-conversation `seq`.
+- WS delivery is best-effort; REST + sync provide durable correctness.
 
-## Backend Design (FastAPI)
+## Backend Design
 
-### Directory Structure
-- `app/main.py` - app bootstrap, lifespan init, CORS, router mounting.
-- `app/core/` - settings, errors/envelope handlers, security, rate limiting.
-- `app/db/` - SQLAlchemy engine/session/base + DB init.
-- `app/models/` - ORM entities.
-- `app/schemas/` - request/response schemas.
-- `app/api/v1/` - routers (`auth`, `users`, `conversations`, `messages`, `sync`).
-- `app/services/` - business logic (`auth_service`, `conversation_service`, `message_service`).
-- `tests/` - integration/unit-style API tests.
+### Modules
+- `app/api/v1/`
+  - REST routers (`auth`, `users`, `conversations`, `messages`, `sync`)
+  - WS router (`ws`)
+- `app/services/`
+  - business logic (`auth_service`, `conversation_service`, `message_service`, `realtime_service`)
+- `app/realtime/`
+  - `protocol.py` command parsing + frame builders
+  - `connection_manager.py` connection/subscription state and fanout
+  - `publisher.py` outbox event to socket fanout
+  - `dispatcher.py` background retrying dispatcher for realtime outbox rows
 
-### Data Model (SQLite Now, Postgres-Friendly)
+### Data Model
 - `users`
   - `id`, `username`, `display_name`, `password_hash`, `created_at`, `updated_at`
 - `refresh_tokens`
@@ -80,164 +76,135 @@
   - `conversation_id`, `user_id`, `joined_at`, `role`
 - `messages`
   - `id` (UUID), `conversation_id`, `sender_id`, `client_message_id`, `seq`, `content`, `created_at`
-  - Unique constraints:
-    - `(sender_id, client_message_id)`
-    - `(conversation_id, seq)`
+  - unique: `(sender_id, client_message_id)`
+  - unique: `(conversation_id, seq)`
 - `conversation_counters`
   - `conversation_id`, `next_seq`
+- `realtime_outbox_events`
+  - `id`, `event_id`, `event_type`, `conversation_id`, `payload_json`, `created_at`, `published_at`, `attempts`, `next_attempt_at`, `last_error`
 
-### Auth and Security
-- Password hashing with Argon2 (`passlib`).
+## Auth and Security
+- Password hashing: Argon2 (`passlib`).
 - JWT short-lived access token.
-- Rotating refresh tokens:
-  - Raw refresh token is never stored.
-  - SHA-256 hash is stored in `refresh_tokens.token_hash`.
-  - Refresh flow revokes old token and links replacement via `replaced_by_token_id`.
-- Input validation via Pydantic.
-- Auth route rate limiting (in-memory limiter).
-- CORS is configured and should be locked down by environment in production.
+- Rotating refresh tokens with hashed storage (`SHA-256`).
+- Auth rate limiter on auth routes.
+- WS security controls:
+  - auth required at handshake
+  - conversation membership validation on subscribe
+  - per-connection command rate limiting
+  - max payload size guard
+  - idle timeout handling
+- CORS is configured and should be environment-restricted in production.
+- Production deployment should use TLS (`wss` externally).
 
-## API Contracts (v1)
+## WebSocket Protocol (Implemented)
 
-### Envelope
-- Success:
+### Connection
+- URL: `ws(s)://<host>/v1/ws`
+- Auth:
+  - preferred: `Authorization: Bearer <access_token>`
+  - fallback: `?access_token=<jwt>`
+
+Server welcome:
 ```json
-{ "data": { } }
+{
+  "type": "connection.welcome",
+  "connection_id": "...",
+  "user_id": "...",
+  "server_time": "2026-02-23T00:00:00+00:00",
+  "heartbeat_sec": 25,
+  "protocol_version": 1
+}
 ```
-- Error:
+
+### Client Commands
 ```json
-{ "error": { "code": "string", "message": "string", "details": {} } }
+{ "op": "subscribe", "conversation_ids": ["c1", "c2"] }
+{ "op": "unsubscribe", "conversation_ids": ["c1"] }
+{ "op": "ping", "ts": 1700000000000 }
 ```
 
-### Auth
-- `POST /v1/auth/register`
-  - Request: `username`, `display_name?`, `password`
-  - Response: `user`, `tokens`
-- `POST /v1/auth/login`
-  - Request: `username`, `password`
-  - Response: `user`, `tokens`
-- `POST /v1/auth/refresh`
-  - Request: `refresh_token`
-  - Response: rotated `tokens`
-- `POST /v1/auth/logout`
-  - Request: `refresh_token`
-  - Response: `{ "ok": true }`
+### Server Frames
+```json
+{ "type": "ack", "op": "subscribe", "ok": true }
+{ "type": "pong", "ts": 1700000000000 }
+{ "type": "error", "error": { "code": "INVALID_COMMAND", "message": "..." } }
+```
 
-### Conversations and Messages
-- `POST /v1/conversations/direct`
-  - Request: `other_user_id`
-  - Behavior: return existing DM or create new DM.
-- `POST /v1/conversations/{id}/messages`
-  - Request: `client_message_id`, `content`
-  - Behavior: idempotent create by sender + client message id.
+### Durable Event Frames (v1)
+- `message.created`
+- `conversation.updated`
 
-### Sync
-- `GET /v1/sync/bootstrap`
-  - Returns `me`, `conversations`, `recent_messages`.
-- `GET /v1/sync/changes?after_seq_by_conversation=...`
-  - Incremental message pull per conversation, keyed by last seen `seq`.
+Example:
+```json
+{
+  "type": "message.created",
+  "event_id": "...",
+  "conversation_id": "c1",
+  "seq": 104,
+  "occurred_at": "2026-02-23T00:00:00+00:00",
+  "payload": {
+    "id": "msg_uuid",
+    "sender_id": "u_2",
+    "client_message_id": "cmid_uuid",
+    "content": "hello",
+    "created_at": "2026-02-23T00:00:00+00:00"
+  }
+}
+```
 
-## Expo/React Native Current Architecture (from `additional_info.md`)
+## Realtime Delivery Semantics
+- Ordering: per conversation by server `seq`.
+- WS delivery: best-effort, at-most-once in transport layer.
+- Durability: guaranteed by REST writes + `/v1/sync/changes` catch-up.
+- Correctness rule: client must always recover via sync after reconnect/gap.
 
-### Current Frontend Stack
-- Expo + React Native + `expo-router`
-- SQLite (`expo-sqlite`)
-- Zustand
-- AsyncStorage
+## Transactional Outbox Flow
+1. Client sends `POST /v1/conversations/{id}/messages`.
+2. Server allocates `seq`, inserts message.
+3. In same transaction, server enqueues `message.created` and `conversation.updated` rows in `realtime_outbox_events`.
+4. Dispatcher polls unpublished rows and publishes over active WS subscriptions.
+5. On success: mark `published_at`.
+6. On failure: increment attempts and schedule retry with exponential backoff.
 
-### Current Frontend Module Map
-- `src/app` - routes/screens
-- `src/db` - SQLite init/schema/migrations
-- `src/db/queries` - raw SQL queries
-- `src/repository` - data mapping and multi-step DB operations
-- `src/usecases` - app usecases
-- `src/sync` - outbox processing
-- `src/state` - session/UI stores
-- `src/domain` - domain types/validators
-- `src/service` - mock seed data
+## Scale Path
+- Current mode: single-process in-memory connection manager.
+- Ready seam for scale:
+  - keep outbox dispatcher and publisher as replaceable runtime components
+  - add Redis pub/sub for multi-instance fanout in future
+  - optionally run dispatcher as separate worker process
 
-### Current SQLite Schema (Frontend)
-- `users`
-- `conversations`
-  - deterministic direct conversation id: `min(userA,userB)__max(userA,userB)`
-- `messages`
-  - includes local delivery `status` (`pending|sent|failed`), `server_echo`
-- `outbox`
-  - queued operations with retry metadata
+## Client Integration Notes
+- Client-side implementation instructions live in `client_websocket_architecture.md`.
+- Key integration contract:
+  - SQLite remains client source of truth
+  - durable WS events are merged into SQLite
+  - reconnect must run `/v1/sync/changes`
 
-### Current Message/Outbox Behavior
-- Send flow enqueues a local pending message and an outbox job.
-- Outbox processor currently marks `send_message` as sent locally (no live backend call yet).
-- Retry and failure status management are local-first.
+## Testing Status
+Current backend tests include:
+- `tests/test_auth.py`
+  - hashing and refresh token rotation
+- `tests/test_messages.py`
+  - idempotent send and sequence behavior
+- `tests/test_ws.py`
+  - invalid token rejection
+  - forbidden subscribe for non-member
+  - delivery of `message.created` and `conversation.updated` to subscribed receiver
+- `tests/test_realtime_dispatcher.py`
+  - successful publish marks row published
+  - failure path retries and eventually publishes
 
-## Backend <-> Expo Integration Plan
-
-### Transport Layer to Add in Frontend
-- `src/transport/rest/client.ts`
-- `src/transport/rest/auth.ts`
-- `src/transport/rest/conversations.ts`
-- `src/transport/rest/messages.ts`
-
-### Token Handling Contract
-- Access token in memory.
-- Refresh token in secure storage.
-- Single-flight refresh coordination to prevent parallel refresh storms.
-
-### Sync Layer to Add/Extend
-- `src/sync/bootstrap.ts`
-  - hydrate SQLite from `/v1/sync/bootstrap`
-- `src/sync/messageSync.ts`
-  - pull incremental changes via `/v1/sync/changes`
-- `src/sync/outboxProcessor.ts`
-  - call send endpoint, reconcile local rows with server identifiers
-
-### Frontend Schema Additions Needed for Server Reconciliation
-- `messages` add:
-  - `client_message_id`
-  - `server_id`
-  - `server_seq`
-  - `server_created_at`
-- `conversations` add:
-  - `server_updated_at` (optional)
-- `outbox.payload_json` should include server request payload fields.
-
-## Important Public Interfaces and Type Changes
-- Backend API paths are root-based and implemented under `app/api/v1/*`.
-- Contract fields required across client/server:
-  - `client_message_id` for idempotency
-  - `seq` for ordering/sync cursor
-  - server reconciliation fields: `server_id`, `server_seq`, `server_created_at`
-- Auth contract:
-  - JWT access token + rotating refresh token.
-
-## Testing and Validation
-
-### Backend (Now)
-- Unit-level auth/security checks:
-  - password hashing verify path
-  - refresh token rotation behavior
-- Integration-level API checks:
-  - auth register/login/refresh/logout
-  - message send/list
-  - idempotent message resend returns existing message
-
-### Frontend (Required During Integration)
-- Unit tests:
-  - refresh coordination (single-flight)
-  - outbox reconciliation and retry logic
-  - sync merge behavior into SQLite
-- Manual scenarios:
-  - offline send -> reconnect -> sent + reconciled IDs/seq
-  - duplicate retry -> no duplicate server message
-  - expired access token -> refresh -> request succeeds
-
-## Rollout Plan
-- Phase 1 (complete): backend MVP APIs and auth/idempotency foundation.
-- Phase 2: Expo transport + sync integration against current backend.
-- Phase 3: optional WebSocket realtime layer without violating offline-first rules.
+## Rollout and Operations
+- Existing backend is production-approachable for single-node deployments.
+- For multi-node, add shared pub/sub and dispatcher coordination.
+- Monitor:
+  - active WS connections
+  - outbox backlog size
+  - publish retries/latency
+  - sync catch-up rates after reconnect
 
 ## Assumptions and Defaults
 - No end-to-end encryption in v1.
-- REST is source of correctness; realtime is additive.
-- SQLite remains initial persistence for both backend dev and frontend local state.
-- Backend remains deployable as a single service behind reverse proxy TLS/HSTS.
+- REST and sync remain authoritative.
+- WS is additive latency optimization, not correctness dependency.

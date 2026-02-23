@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     auth_rate_limit_window_seconds: int = 60
     auth_rate_limit_max_requests: int = 12
 
+    ws_heartbeat_sec: int = 25
+    ws_idle_timeout_sec: int = 75
+    ws_max_command_bytes: int = 8192
+    ws_max_ids_per_subscribe: int = 100
+    ws_max_subscriptions_per_connection: int = 200
+    ws_rate_limit_window_sec: int = 10
+    ws_rate_limit_max_commands: int = 30
+
+    realtime_dispatcher_enabled: bool = True
+    realtime_dispatcher_poll_ms: int = 200
+    realtime_dispatcher_batch_size: int = 100
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:

@@ -36,7 +36,7 @@ configure_engine(get_settings().database_url)
 
 
 def init_db() -> None:
-    from app.models import conversation, message, refresh_token, user  # noqa: F401
+    from app.models import conversation, message, realtime_outbox_event, refresh_token, user  # noqa: F401
 
     if engine is None:
         raise RuntimeError("Database engine is not configured")

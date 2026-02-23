@@ -13,20 +13,42 @@ from app.api.v1.router import api_router
 from app.core.errors import add_exception_handlers, success_response
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
+import app.db.session as db_session
 from app.db.session import init_db
+from app.realtime import ConnectionManager, RealtimeDispatcher, RealtimePublisher
 
 settings = get_settings()
 configure_logging(debug=settings.debug)
 logger = logging.getLogger(__name__)
 
 
+def _open_db_session():
+    if db_session.SessionLocal is None:
+        raise RuntimeError("Database session factory is not configured")
+    return db_session.SessionLocal()
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     logger.info("Application startup started")
     logger.debug("Initializing database schema")
     init_db()
+    app.state.connection_manager = ConnectionManager(
+        max_subscriptions_per_connection=settings.ws_max_subscriptions_per_connection
+    )
+    app.state.realtime_publisher = RealtimePublisher(app.state.connection_manager)
+    app.state.realtime_dispatcher = RealtimeDispatcher(
+        publisher=app.state.realtime_publisher,
+        session_factory=_open_db_session,
+        poll_interval_sec=settings.realtime_dispatcher_poll_ms / 1000.0,
+        batch_size=settings.realtime_dispatcher_batch_size,
+    )
+    if settings.realtime_dispatcher_enabled:
+        await app.state.realtime_dispatcher.start()
     logger.info("Application startup completed")
     yield
+    if settings.realtime_dispatcher_enabled:
+        await app.state.realtime_dispatcher.stop()
     logger.info("Application shutdown completed")
 
 
